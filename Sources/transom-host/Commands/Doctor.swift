@@ -3,6 +3,8 @@ import ArgumentParser
 import CoreGraphics
 import Foundation
 import ScreenCaptureKit
+import TransomKit
+import os
 
 /// `doctor` — check that the machine can host a Transom capture session.
 ///
