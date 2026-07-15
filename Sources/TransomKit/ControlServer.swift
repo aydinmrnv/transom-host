@@ -16,9 +16,13 @@ public actor ControlServer {
     private let registry: WindowRegistry
     private var active: TCPTransport?
 
-    /// Called for every decoded client→host message (e.g. `requestResize`). Phase
-    /// 4 wires this to AX; Phase 3 just surfaces it.
+    /// Called for every decoded client→host message (e.g. `requestResize`,
+    /// `input`). Phase 5 wires this to AX + `CGEventPost` via `InputInjector`.
     public var onClientMessage: (@Sendable (ClientMessage) -> Void)?
+
+    /// Called when the active client disconnects, so input state (held modifiers)
+    /// can be reset before the next client connects (issue #7).
+    public var onClientDisconnect: (@Sendable () -> Void)?
 
     public init(vdsSize: WireSize, registry: WindowRegistry) {
         self.vdsSize = vdsSize
@@ -27,6 +31,10 @@ public actor ControlServer {
 
     public func setOnClientMessage(_ handler: @escaping @Sendable (ClientMessage) -> Void) {
         self.onClientMessage = handler
+    }
+
+    public func setOnClientDisconnect(_ handler: @escaping @Sendable () -> Void) {
+        self.onClientDisconnect = handler
     }
 
     /// Accept connections forever (one active at a time). Each `handle` runs until
@@ -82,6 +90,7 @@ public actor ControlServer {
 
         Log.general.notice("control: client disconnected")
         if active === transport { active = nil }
+        onClientDisconnect?()
         await transport.close()
     }
 

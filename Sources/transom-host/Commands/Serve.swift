@@ -54,6 +54,16 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .long, help: "Auto-stop after N seconds (default: run until Ctrl-C).")
     var seconds: Double?
 
+    @Flag(
+        name: .long,
+        help:
+            "Map Windows modifiers namesake (Ctrl→Control) instead of the default swap (Ctrl→Command)."
+    )
+    var namesakeModifiers: Bool = false
+
+    @Flag(name: .long, help: "Print the full translation chain for every injected input event.")
+    var logInput: Bool = false
+
     func run() async throws {
         // Stream output live: stdout is block-buffered to a pipe/file, so without
         // this the status lines never appear while the long-running server runs.
@@ -100,11 +110,33 @@ struct Serve: AsyncParsableCommand {
         let watcher = WindowWatcher(pid: target.pid, display: disp, registry: registry)
         watcher.onEvent = { event in eventSink.yield(event) }
 
+        // Input injection (Phase 5): the injector turns client `Input` /
+        // `RequestFocus` into CGEvents + AX raises, translating window-local pixels
+        // through the one coordinate function (I-3). Modifier mapping is the
+        // Cmd-vs-Ctrl product decision (issue #7); default swaps Ctrl→Command.
+        let injector = InputInjector(
+            display: disp, registry: registry,
+            modifierMap: namesakeModifiers ? .namesake : .swap)
+        if logInput {
+            injector.onTrace = { line in print("  \(line)") }
+        }
+        print(
+            "  input: modifiers=\(namesakeModifiers ? "namesake (Ctrl→Control)" : "swap (Ctrl→Command)")"
+        )
+
         let controlServer = ControlServer(vdsSize: vdsSize, registry: registry)
         await controlServer.setOnClientMessage { message in
-            // Phase 4 wires requestResize -> AX. For now, surface it.
-            Log.general.notice(
-                "control: client -> \(String(describing: message), privacy: .public)")
+            switch message {
+            case .input, .requestFocus:
+                injector.handle(message)
+            case .requestResize, .requestClose:
+                // Geometry roundtrip is a separate issue; surface for now.
+                Log.general.notice(
+                    "control: client -> \(String(describing: message), privacy: .public)")
+            }
+        }
+        await controlServer.setOnClientDisconnect {
+            injector.resetModifiers()
         }
         let controlListener = try TCPListener(host: host, port: controlPort, label: "control")
 
