@@ -1,31 +1,56 @@
-# Transom: Wire Protocol (DRAFT)
+# Transom: Wire Protocol
 
-**Status:** draft. **Not implemented. Do not implement it yet.**
+**Status:** v1, **implemented on the host** (issue #3). The control channel and
+the video channel described here are what `transom-host serve` actually speaks.
+This is now a spec to code against, not a sketch. If you change a shape, change
+the host (`Sources/TransomKit/WireProtocol.swift`) and this file in the same
+commit, or the two halves diverge.
 
-This document exists early on purpose. The host and client are built by separate
-agents who cannot see each other's code, and they will meet at M2. Writing the
-contract down now is what stops them from inventing incompatible models of
-coordinate spaces, units, and window identity.
+The host and client are built by separate agents who cannot see each other's
+code. This document is the only shared context, which is why the byte-level
+shapes below are exact.
 
-Treat this as the shared mental model, not a spec to code against. It will change
-once M0 answers OQ-1 and OQ-3.
+**Transport for v1 is TCP** (see §1). The custom-UDP video transport is the M3
+target and is deliberately behind an interface so it does not touch anything
+above the transport line.
 
 ---
 
 ## 1. Channels
 
-Two channels, different requirements:
+Two **separate TCP connections**, not one. A 200KB video frame must never
+head-of-line-block a geometry message, so control and video get their own
+sockets.
 
-| Channel | Transport | Requirement |
-|---|---|---|
-| **Video** | Custom UDP | Lowest possible latency. No jitter buffer. Frames may be dropped, never delayed |
-| **Control** | TCP or reliable UDP | Ordered, reliable. Window lifecycle, geometry, input |
+| Channel | v1 transport | Default port | Requirement |
+|---|---|---|---|
+| **Control** | TCP | 7000 | Ordered, reliable. Window lifecycle, geometry, input |
+| **Video** | TCP | 7001 | Lowest latency achievable on TCP. Frames may be dropped, never delayed |
 
-**Video is not WebRTC.** See architecture.md section 5: WebRTC's jitter buffer is
-50-100ms and `playoutDelayHint: 0` does not remove it. This is settled.
+### Why TCP for v1 (not UDP)
 
-Control is low bandwidth (a few KB/s) and correctness matters more than latency,
-so plain TCP is fine for v1.
+`docs/protocol.md` used to say custom UDP for video. **That is the M3 target, not
+v1.** On a wired LAN, loss is effectively zero, and loss is the only thing TCP's
+head-of-line blocking punishes. TCP for v1 removes packet reassembly, reordering,
+and FEC from the critical path and gets a working system months earlier. The
+swap to UDP is contained behind a `PacketTransport` interface on the host
+(`Sources/TransomKit/Transport.swift`); it moves whole messages, so the framing
+in §4/§6 is all a UDP transport would need to reproduce (one datagram = one
+message).
+
+- **`TCP_NODELAY` on both connections.** Nagle silently adds tens of ms.
+- **Video is not WebRTC.** WebRTC's jitter buffer is 50-100ms and
+  `playoutDelayHint: 0` does not remove it (architecture.md §5). Settled.
+- The host **binds only to a private address** (10/8, 172.16/12, 192.168/16,
+  127/8, 169.254/16) and refuses anything else. There is no auth and no
+  encryption; see the README security note. The client connects by IP — no
+  discovery, no Bonjour.
+
+### Framing
+
+Both channels are length-prefixed message streams: **a 4-byte big-endian
+unsigned length, then that many payload bytes.** On the control channel the
+payload is UTF-8 JSON (§4). On the video channel the payload is binary (§6).
 
 ---
 
@@ -44,36 +69,47 @@ Restating `invariants.md` I-2 and I-3 because this is where they get violated:
 
 ## 3. Window identity
 
-**Unresolved.** See architecture.md OQ-3.
+`WindowId` is an opaque **`u64` minted by the host** (starting at 1). The client
+treats it as a token, keys its proxy windows on it, and **never interprets it**.
+An id is stable for the lifetime of the window and is not reused within a session.
 
-Every rect on the wire needs a stable ID the client keys its proxy windows on.
-SCK exposes `CGWindowID`; AX exposes `AXUIElement`; correlating them may require
-private API (`_AXUIElementGetWindow`).
-
-**Provisional:** `WindowId` is an opaque `u64` minted by the host. The host owns
-the mapping to whatever it uses internally. The client treats it as a token and
-never interprets it.
-
-This lets both sides proceed while OQ-3 is open, and confines the eventual answer
-to the host.
+The host maps each id to an `AXUIElement` in a `WindowRegistry`
+(`Sources/TransomKit/WindowRegistry.swift`). However OQ-3 is eventually resolved
+(private `_AXUIElementGetWindow`, frame heuristics, …), that correlation stays
+confined to the host behind this id. The client is unaffected by the answer.
 
 ---
 
 ## 4. Control messages
 
-Illustrative shape, not final. Serialization undecided (probably CBOR or
-length-prefixed JSON for v1; readable beats fast at a few KB/s).
+**Serialization: length-prefixed UTF-8 JSON.** Readable beats fast at a few KB/s.
+Every message is a flat JSON object with a `"type"` discriminator and the fields
+below — *not* a nested/enum encoding, so any language decodes it trivially. Field
+names are exact. `u64` ids are JSON numbers (the client is Rust; no 2^53 issue).
+
+On connect (and on every reconnect) the host sends, in order: **`hello`**, one
+**`windowCreated`** per live window, then a **`tileLayout`** — a full resync — and
+then streams live events. The host keeps running if the client drops; a
+reconnecting client gets the full resync again.
 
 ### Host -> Client
 
 ```
-WindowCreated  { id: u64, rect: Rect, title: String, kind: WindowKind }
-WindowDestroyed{ id: u64 }
-WindowMoved    { id: u64, rect: Rect }          // ACTUAL geometry, see I-4
-WindowTitle    { id: u64, title: String }
-WindowFocused  { id: u64 }
-TileLayout     { windows: [(u64, Rect)], display_size: Size }
-Error          { code: u32, message: String }
+hello          { protocol: u32, vdsSize: Size }         // first message; version + display size
+windowCreated  { id: u64, rect: Rect, title: String, kind: WindowKind }
+windowDestroyed{ id: u64 }
+windowMoved    { id: u64, rect: Rect }                  // ACTUAL geometry, see I-4
+windowTitle    { id: u64, title: String }
+windowFocused  { id: u64 }
+tileLayout     { windows: [{ id: u64, rect: Rect }], displaySize: Size }
+error          { code: u32, message: String }
+```
+
+Concrete bytes on the wire (one framed control message):
+
+```
+00 00 00 5b  {"type":"windowMoved","id":1,"rect":{"x":2300,"y":500,"w":1312,"h":844}}
+^ 4-byte BE length = 0x5b   ^ JSON payload
 ```
 
 `WindowKind` distinguishes a normal window from transient UI (menu, sheet,
@@ -128,22 +164,28 @@ client must handle "asked 2560x1440, got 2560x1438" without breaking.
 
 ## 6. Video frames
 
+The video channel is **binary**, length-prefixed like the control channel (§1),
+but the payload is not JSON. The first payload byte is a type tag:
+
 ```
-FrameHeader {
-  seq: u64,
-  pts: u64,           // host monotonic clock, microseconds
-  vds_size: Size,     // full virtual display, for sanity checking
-  keyframe: bool,
-}
+0x01  config   : hvcC ...                          // HEVC parameter sets (VPS/SPS/PPS)
+0x02  frame    : seq:u64  ptsMicros:u64  flags:u8  hevc...   // one access unit
+                 flags bit0 = keyframe.  integers big-endian.
 ```
 
-Rect metadata lives on the control channel, not in the frame header. The client
-correlates by timestamp.
+- **`config` is sent first**, before the first frame, and again after a
+  reconnect. An `hvc1` stream carries no inline parameter sets, so the decoder
+  needs the `hvcC` configuration record before it can decode anything.
+- **`frame`** carries `seq` (monotonic), `ptsMicros` (host clock, microseconds),
+  a keyframe flag, and the raw HEVC access-unit bytes. The codec is HEVC **4:4:4
+  10-bit** (architecture.md OQ-4).
+
+Rect metadata lives on the **control** channel, not in the frame header; the
+client correlates by timestamp.
 
 **Open:** how much correlation is actually needed. Metadata arriving a frame late
-is a visible shear during window motion (OQ-5). Host M0 `probe` measures this. If
-the lag is under a frame, best-effort may be fine and the timestamp correlation
-can be dropped.
+is a visible shear during window motion (OQ-5). If the lag is under a frame,
+best-effort may be fine and timestamp correlation can be dropped.
 
 ---
 
@@ -156,13 +198,23 @@ can be dropped.
 
 ---
 
-## 8. Not designed yet
+## 8. Cursor (resolved) and what is still deferred
+
+**Cursor: captured, not synthesized.** The host sets
+`SCStreamConfiguration.showsCursor = true`, so the real Mac cursor is already in
+the captured frame, pixel-correct, for free. Input posts `CGEvent`s (Phase 5),
+the real cursor moves, SCK captures it. **The client hides its own OS cursor when
+it is over a proxy window** so there are not two cursors. Simplest correct answer
+for v1.
+
+Still deferred:
 
 - **Auth and encryption.** Assume a trusted wired LAN. Do not ship this over the
-  internet.
+  internet. The host refuses to bind to a non-private address as a guardrail, not
+  a security boundary.
 - **Clipboard.** Wanted eventually, not now.
 - **Audio.** Later, if ever.
-- **Multiple hosts or clients.** One to one.
-- **Reconnect and state resync.** Needed before it is usable daily.
-- **Cursor.** Whose cursor renders where, and does the Mac cursor need to be
-  captured separately or synthesized on the client? Genuinely unresolved.
+- **Multiple hosts or clients.** One to one; the host serves one client at a time.
+
+Reconnect and state resync are **implemented** (§4): the host keeps running when
+the client drops, and a reconnecting client gets a full resync.

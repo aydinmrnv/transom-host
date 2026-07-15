@@ -31,11 +31,13 @@ import os
 public final class HEVCEncoder: @unchecked Sendable {
 
     /// One encoded HEVC access unit. `byteCount` is the compressed size — the
-    /// number that, summed over a second, is the bitrate.
+    /// number that, summed over a second, is the bitrate. `data` is the elementary
+    /// stream bytes for the wire (empty when the caller only needs the size).
     public struct EncodedFrame: Sendable {
         public let byteCount: Int
         public let pts: CMTime
         public let isKeyframe: Bool
+        public let data: Data
     }
 
     public struct Config: Sendable {
@@ -92,9 +94,21 @@ public final class HEVCEncoder: @unchecked Sendable {
     /// thread, so the closure must be thread-safe.
     public var onEncodedFrame: (@Sendable (EncodedFrame) -> Void)?
 
+    /// When true, each `EncodedFrame` carries the compressed `data` bytes (the
+    /// wire path needs them). When false — the default — only sizes are collected,
+    /// so the measurement path (`encode`) does not pay for a copy it discards. Set
+    /// before the first frame; it is read on the VideoToolbox callback thread.
+    public var extractFrameData = false
+
     /// VideoToolbox's own read-back of whether the compression session is running
     /// on the hardware encoder. Populated at `init`.
     public private(set) var usingHardware = false
+
+    /// The HEVC parameter sets (`hvcC` configuration record) from the encoded
+    /// stream's format description, captured on the first frame. The decoder needs
+    /// these before it can decode any frame (they are not inline in `hvc1`), so
+    /// the video server sends them to the client before the first frame.
+    public private(set) var parameterSetsHVCC: Data?
 
     /// The codec + chroma the compression session reports it is producing, for
     /// I-1 / OQ-4 verification (e.g. "HEVC 4:4:4").
@@ -273,14 +287,43 @@ public final class HEVCEncoder: @unchecked Sendable {
             isKeyframe = !notSync
         }
 
-        if outputFormatSummary == "unknown",
-            let format = CMSampleBufferGetFormatDescription(sampleBuffer)
-        {
-            outputFormatSummary = Self.describe(format)
+        if let format = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            if outputFormatSummary == "unknown" {
+                outputFormatSummary = Self.describe(format)
+            }
+            if parameterSetsHVCC == nil {
+                parameterSetsHVCC = Self.extractHVCC(from: format)
+            }
         }
 
+        let data = extractFrameData ? Self.copyBytes(from: sampleBuffer) : Data()
         onEncodedFrame?(
-            EncodedFrame(byteCount: byteCount, pts: pts, isKeyframe: isKeyframe))
+            EncodedFrame(byteCount: byteCount, pts: pts, isKeyframe: isKeyframe, data: data))
+    }
+
+    /// Copy the contiguous encoded bytes out of a sample buffer for the wire.
+    private static func copyBytes(from sampleBuffer: CMSampleBuffer) -> Data {
+        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return Data() }
+        let length = CMBlockBufferGetDataLength(block)
+        guard length > 0 else { return Data() }
+        var data = Data(count: length)
+        let status = data.withUnsafeMutableBytes { raw -> OSStatus in
+            guard let base = raw.baseAddress else { return kCMBlockBufferBadPointerParameterErr }
+            return CMBlockBufferCopyDataBytes(
+                block, atOffset: 0, dataLength: length, destination: base)
+        }
+        return status == noErr ? data : Data()
+    }
+
+    /// The `hvcC` configuration record (VPS/SPS/PPS) from a format description.
+    private static func extractHVCC(from format: CMFormatDescription) -> Data? {
+        guard
+            let atoms = CMFormatDescriptionGetExtension(
+                format, extensionKey: kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms)
+                as? [String: Any],
+            let hvcC = atoms["hvcC"] as? Data
+        else { return nil }
+        return hvcC
     }
 
     /// Flush any buffered frames and tear the sessions down. Idempotent-ish: call

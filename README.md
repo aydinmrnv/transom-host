@@ -5,9 +5,12 @@ macOS app windows streamed to a Windows PC as independent, native windows you ca
 move, resize, snap, and fullscreen. Think RDS RemoteApp with a Mac host — which
 does not otherwise exist.
 
-> **⚠️ Pre-alpha. This does not work yet.** Today the only command that does
-> anything real is `doctor`. Everything else is a stub. This repo is a scaffold
-> for an unproven design; treat it as a research prototype, not software.
+> **⚠️ Pre-alpha research prototype.** The host half works end to end on the
+> target Mac: it probes HEVC 4:4:4 hardware encode, tiles windows non-overlapping,
+> captures + hardware-encodes the virtual display, and serves window rects (and
+> optionally video) to a client over TCP. It has **no auth and no encryption**
+> (see Security below), the Windows client is a separate work in progress, and
+> none of this is verifiable in CI — only on the Mac Studio (I-7).
 
 ## The problem
 
@@ -60,18 +63,34 @@ are attributed to your **terminal app** (Terminal, iTerm2, Ghostty, VS Code…),
 not to `transom-host`. `doctor` prints this in full — read it before you go
 hunting for a "transom-host" checkbox that will never appear.
 
-## Command surface (mostly stubs)
+## ⚠️ Security: none
+
+**There is no authentication and no encryption.** Anyone on the LAN who can reach
+the port gets a live video feed of the Mac and the ability to inject keystrokes
+and mouse events. That is acceptable for a **wired home LAN** and **completely
+unacceptable anywhere else** — do not port-forward it, do not run it on a network
+you do not trust, do not put it on the internet.
+
+As a guardrail (not a security boundary), `serve` **refuses to bind to anything
+but a private address** (`10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16`)
+and defaults to `127.0.0.1`. Pass `--host <LAN-ip>` to expose it to a real client.
+Auth and encryption are explicitly out of scope until designed properly.
+
+## Command surface
 
 | Command | Status | Purpose |
 | --- | --- | --- |
 | `doctor` | **real** | permission / display / SCK health check |
-| `displays` | stub | machine-readable display list |
-| `windows` | stub | enumerate app windows + AX geometry |
-| `place` | stub | set one window's size/position via AX |
-| `tile` | stub | pack windows non-overlapping on the virtual display |
-| `capture` | stub | run the shared ScreenCaptureKit stream |
-| `probe` | stub | architecture de-risking experiments |
-| `menuwatch` | stub | stream the focused app's global menu bar |
+| `displays` | **real** | machine-readable display list |
+| `windows` | **real** | enumerate app windows + AX geometry |
+| `place` | **real** | set one window's size/position via AX, report the readback delta |
+| `tile` | **real** | pack windows non-overlapping (with gutters) on the virtual display |
+| `capture` | **real** | run the shared ScreenCaptureKit stream, verify no scaling (I-1) |
+| `encodeprobe` | **real** | probe HEVC 4:4:4 hardware encode (OQ-4) |
+| `encode` | **real** | capture + HEVC 4:4:4 10-bit hardware encode; report fps/bitrate |
+| `serve` | **real** | tile + watch an app and serve rects (+ optional video) over TCP |
+| `probe` | **real** | architecture de-risking experiments |
+| `menuwatch` | **real** | stream the focused app's windows/menus (answers OQ-1) |
 
 ## License
 
