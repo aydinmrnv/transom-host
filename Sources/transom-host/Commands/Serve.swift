@@ -100,12 +100,17 @@ struct Serve: AsyncParsableCommand {
         let watcher = WindowWatcher(pid: target.pid, display: disp, registry: registry)
         watcher.onEvent = { event in eventSink.yield(event) }
 
+        // Phase 4 (issue #6): the geometry roundtrip. Client RequestResize is
+        // throttled (~10Hz), written to AX, read back, and emitted as windowMoved
+        // (ACTUAL geometry, I-4) through the same ordered event stream. Requests
+        // are handled in arrival order via their own stream so AX writes serialise.
+        let resize = ResizeService(
+            registry: registry, display: disp, gutter: gutter,
+            emit: { event in eventSink.yield(event) })
+        let (clientMessages, clientSink) = AsyncStream.makeStream(of: ClientMessage.self)
+
         let controlServer = ControlServer(vdsSize: vdsSize, registry: registry)
-        await controlServer.setOnClientMessage { message in
-            // Phase 4 wires requestResize -> AX. For now, surface it.
-            Log.general.notice(
-                "control: client -> \(String(describing: message), privacy: .public)")
-        }
+        await controlServer.setOnClientMessage { message in clientSink.yield(message) }
         let controlListener = try TCPListener(host: host, port: controlPort, label: "control")
 
         // Start the AX watcher on its own run-loop thread and wait until it has
@@ -131,6 +136,24 @@ struct Serve: AsyncParsableCommand {
         let controlTask = Task { await controlServer.serve(listener: controlListener) }
         let forwardTask = Task {
             for await event in events { await controlServer.broadcast(event) }
+        }
+        // Drive resize requests in arrival order (AX writes serialise on the actor),
+        // and tick at ~20Hz so a coalesced live from a paused drag still flushes.
+        let resizeTask = Task {
+            for await message in clientMessages {
+                if case let .requestResize(id, size, phase) = message {
+                    await resize.handle(id: id, size: size, phase: phase)
+                } else {
+                    Log.general.notice(
+                        "control: client -> \(String(describing: message), privacy: .public)")
+                }
+            }
+        }
+        let tickTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                await resize.tick()
+            }
         }
         controlListener.start()
 
@@ -182,13 +205,21 @@ struct Serve: AsyncParsableCommand {
         }
 
         // Clean shutdown (only reached in --seconds mode).
+        let (reqIn, writes) = (await resize.requestsIn, await resize.axWrites)
+        if reqIn > 0 {
+            print(
+                "  resize: \(reqIn) request(s) in, \(writes) AX write(s) out (throttled to ~10Hz)")
+        }
         controlListener.stop()
         videoListener?.stop()
         if let capture { await capture.stop() }
         encoder?.finish()
         eventSink.finish()
+        clientSink.finish()
         controlTask.cancel()
         forwardTask.cancel()
+        resizeTask.cancel()
+        tickTask.cancel()
         videoTask?.cancel()
         frameTask?.cancel()
         if let runLoop = ctx.runLoop { CFRunLoopStop(runLoop) }

@@ -88,7 +88,8 @@ Auth and encryption are explicitly out of scope until designed properly.
 | `capture` | **real** | run the shared ScreenCaptureKit stream, verify no scaling (I-1) |
 | `encodeprobe` | **real** | probe HEVC 4:4:4 hardware encode (OQ-4) |
 | `encode` | **real** | capture + HEVC 4:4:4 10-bit hardware encode; report fps/bitrate |
-| `serve` | **real** | tile + watch an app and serve rects (+ optional video) over TCP |
+| `serve` | **real** | tile + watch an app and serve rects (+ optional video) over TCP; drives the resize roundtrip (throttled AX writes, readback, I-4) |
+| `mockresize` | **real** | mock client: drive a Live/End resize drag against `serve` and measure the ~10Hz throttle |
 | `probe` | **real** | architecture de-risking experiments |
 | `menuwatch` | **real** | stream the focused app's windows/menus (answers OQ-1) |
 
