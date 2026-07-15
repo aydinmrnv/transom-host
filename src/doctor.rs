@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Direct3D::{
     D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_12_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
+    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{
@@ -26,9 +26,9 @@ use windows::Win32::Graphics::Gdi::{
     HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
 };
 use windows::Win32::UI::HiDpi::{
-    AreDpiAwarenessContextsEqual, GetDpiForMonitor, GetThreadDpiAwarenessContext, MDT_EFFECTIVE_DPI,
+    AreDpiAwarenessContextsEqual, GetDpiForMonitor, GetThreadDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-    DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, DPI_AWARENESS_CONTEXT_UNAWARE,
+    DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, DPI_AWARENESS_CONTEXT_UNAWARE, MDT_EFFECTIVE_DPI,
 };
 
 /// The primary monitor sets this bit in `MONITORINFO::dwFlags`. windows-rs does
@@ -208,9 +208,11 @@ fn report_monitors() {
             let mut info = MONITORINFOEXW::default();
             info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
 
-            let ok =
-                GetMonitorInfoW(*monitor, &mut info as *mut MONITORINFOEXW as *mut MONITORINFO)
-                    .as_bool();
+            let ok = GetMonitorInfoW(
+                *monitor,
+                &mut info as *mut MONITORINFOEXW as *mut MONITORINFO,
+            )
+            .as_bool();
             if !ok {
                 println!("  monitor {i}: GetMonitorInfoW failed");
                 continue;
@@ -230,7 +232,10 @@ fn report_monitors() {
             let device = wide_to_string(&info.szDevice);
             let hz = refresh_hz(&info.szDevice);
 
-            println!("  monitor {i}{}", if is_primary { " (primary)" } else { "" });
+            println!(
+                "  monitor {i}{}",
+                if is_primary { " (primary)" } else { "" }
+            );
             println!("    handle:  {monitor:?}");
             println!("    device:  {device}");
             println!(
@@ -253,8 +258,7 @@ fn refresh_hz(device: &[u16]) -> u32 {
             dmSize: std::mem::size_of::<DEVMODEW>() as u16,
             ..Default::default()
         };
-        if EnumDisplaySettingsW(PCWSTR(device.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode)
-            .as_bool()
+        if EnumDisplaySettingsW(PCWSTR(device.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode).as_bool()
         {
             mode.dmDisplayFrequency
         } else {
