@@ -1,202 +1,332 @@
-# Transom architecture
+# Transom: Architecture
 
-**This document is canonical.** The `transom-host` (macOS) and `transom-client`
-(Windows) repos both defer to it. If code and this document disagree, the
-disagreement is a bug in one of them — fix it, don't fork the design.
+**Status:** pre-alpha. Nothing works yet. This document describes the intended
+design and the reasoning behind it.
 
-Status: pre-alpha. This describes the intended system. Almost none of it is
-built yet.
+**Canonical copy:** `transom-host/docs/architecture.md`. The copy in
+`transom-client` is a mirror. If they disagree, the host copy wins.
 
 ---
 
-## The problem
+## 1. The problem
 
-I want individual macOS app windows — a single Xcode window, a single Conductor
-window — to appear on my Windows PC as independent, native windows that I can
-move, resize, snap, and fullscreen with the Windows window manager. Not a
-mirrored desktop. Not a VNC rectangle. Windows that behave like local windows
-but are rendered by a Mac.
+Transom streams individual macOS application windows to a Windows PC, where each
+one appears as an independent, native, movable, resizable window.
 
-This is RDS RemoteApp with the roles reversed: a **Mac host** serving seamless
-windows to a **Windows client**. That product does not exist.
+This does not exist today. Seamless per-window remoting is a solved problem in
+exactly one direction: Windows host to anything else. Microsoft RDS RemoteApp,
+`xfreerdp /app:`, and rdesktop's SeamlessRDP all do it well. Parallels Coherence
+does the same trick locally. Nothing does it with a **macOS host**.
 
-The closest thing that works today is Parsec. Parsec streams my Mac Studio to my
-Windows PC at genuinely excellent quality — low latency, sharp, hardware
-encoded. But its *windowed* mode scales the **entire remote desktop** into the
-window. Shrink the Parsec window to Xcode-sized and you are downscaling a
-5K desktop into a small rectangle: the text becomes an unreadable smear. Parsec
-is doing exactly what it was built to do (present a whole desktop), and that is
-exactly the wrong thing for a single window.
+### 1.1 Why the direction matters
 
-The core insight: **this is a resampling problem, not a codec problem.** The
-codec is fine. The image is ruined before and after the codec by scaling steps
-that should not exist. Every resampling stage in the pipeline is a bug.
+Windows applications carry their own chrome. Menus, toolbars, and title bar all
+live inside the application's own `HWND`. You can lift that single rectangle out,
+put it on another desktop, and it is a complete, usable application.
 
-## Why this doesn't already exist (and the easy direction does)
+macOS applications do not work this way:
 
-The *reverse* direction — a Windows host serving seamless apps to any client —
-is a solved, commodding problem:
+- **The menu bar is global.** Xcode's File / Edit / Product menus are not in the
+  Xcode window. They live in the system menu bar, which belongs to whichever
+  application is frontmost. Capture only the Xcode window and you get a
+  menu-less Xcode.
+- **Transient UI is separate windows.** Every `NSMenu` popup, sheet, popover,
+  tooltip, and code-completion list is its own window in the WindowServer, not
+  pixels inside the parent. Capture only the main window and completion popups
+  simply do not appear.
+- **No network transparency.** The macOS WindowServer was never network
+  transparent the way X11 is, and macOS has no RDS equivalent, which means no
+  per-session isolated window stack. One Mac has one focus, one cursor, one
+  menu bar.
 
-- Windows has **RDS RemoteApp**: the OS itself knows how to render one
-  application's windows into a remote session and ship them as separate windows.
-- `xfreerdp /app:` consumes exactly that.
-- The Windows compositor (DWM) is effectively network-transparent for this use
-  case, and Win32 apps carry their menus **inside** their own windows.
+These three facts are why this project is hard and why nobody has shipped it.
 
-macOS gives you none of that:
+### 1.2 What actually motivates this
 
-1. **No RDS equivalent.** There is no supported OS facility for "render this one
-   app's windows into a headless session and stream them out as windows." Screen
-   sharing is whole-desktop.
-2. **WindowServer is not network transparent.** You cannot ask the compositor
-   for a per-window surface stream over the wire. You get pixels off a display,
-   not a structured window feed.
-3. **Global menu bar.** Mac apps put their menus in the **global menu bar at the
-   top of the screen**, not inside each window. Lift one window out of its
-   desktop context and you have lifted it away from its menus — you get a
-   menu-less app. (See `menuwatch`: the host has to observe the focused app's
-   menu tree and the client has to re-present it.)
+The author already streams the Mac Studio to the Windows PC with Parsec, and the
+quality and latency are good. **Latency is not the problem. Codecs are not the
+problem.**
 
-So the Windows-host direction is easy because the platform was built for it, and
-the Mac-host direction is hard because every affordance you'd want is missing.
-Transom builds the missing pieces on top of the primitives macOS *does* give us:
-ScreenCaptureKit for pixels, the Accessibility (AX) API for geometry and menus.
+The problem is that Parsec is a game-streaming tool. Games render at a fixed
+resolution, and Parsec's job is to scale that to fit your window. That is correct
+for games and fatal for text. In Parsec's windowed mode, shrinking the window
+does not relayout the Mac desktop, it **downscales** it. Text becomes unreadable.
 
-## The design: virtual display as a sprite sheet
+RDP never has this problem because it is a desktop tool: resize the client and
+the remote desktop genuinely changes resolution, content relayouts, and pixels
+stay 1:1.
 
-The naive approach is one capture stream and one encoder **per window**. That is
-wrong on multiple axes: N encoders don't fit, each new window has a cold-start
-cost, and occluded/off-screen windows stop rendering so you capture nothing.
+> **Transom's thesis: this is a resampling problem, not a codec problem.**
 
-Transom does the opposite. There is **one** large **virtual display** on the Mac
-that nobody ever looks at. It is a compositing scratch space — a sprite sheet.
+---
 
-- The virtual display is created **externally with BetterDisplay**. Transom does
-  **not** create it programmatically. (`CGVirtualDisplay` is private API and is
-  explicitly out of scope.)
-- All managed app windows are **tiled onto it non-overlapping** via the AX API
-  (`tile`, `place`). Because nothing overlaps and nothing is off-screen, **every
-  window always renders and is never occluded.**
-- **One** ScreenCaptureKit stream captures that whole display. **One** hardware
-  encoder. (`capture`.)
-- The client receives the single shared texture and **crops per-window
-  sub-rectangles** out of it. Each cropped rect is drawn into its own native
-  Windows window.
+## 2. The core mechanism: geometry mirroring
 
-What this buys us:
+```
+Windows proxy window resizes
+  -> host sets the Mac window to EXACTLY that pixel size via AXUIElement
+  -> the Mac application relayouts natively
+  -> host captures at that size
+  -> client blits 1:1, never resampling
+```
 
-- **One encoder, not N.** Fixed, predictable GPU cost regardless of window count.
-- **No occlusion.** Non-overlapping tiling guarantees live pixels for every
-  window, every frame.
-- **Popups are free.** NSMenus, sheets, tooltips, and popovers are already
-  inside the captured frame, so they cost nothing extra to transport — *if* they
-  land on the virtual display where we can see them (see Open questions).
-- **No cold start.** A newly focused window is already being captured; there is
-  no per-window stream to spin up.
+Per-window streaming is what makes this possible per window. But the feature is
+geometry mirroring. Everything else is plumbing.
 
-Window rectangles — which sub-rect of the shared texture is which logical
-window, and where — travel on a **side metadata channel**, separate from the
-video. The client is the source of truth for where windows go on the Windows
-desktop; the host is the source of truth for where they currently sit on the
-virtual display.
+**Every resampling stage in the pipeline is a bug.** See `invariants.md`.
 
-**Division of responsibility:** the **Windows client is the real window
-manager.** It owns window placement, focus, stacking, fullscreen, snapping. The
-**Mac host only draws** — it tiles for capture convenience, not for a human.
-Nobody looks at the virtual display.
+### 2.1 The live-resize compromise
 
-## Geometry mirroring and the no-resampling rule
+Geometry mirroring cannot be 1:1 *during* a drag. Each frame of a resize drag
+would need a full roundtrip:
 
-This is the whole point, so it gets its own rule:
+```
+WM_SIZING -> network -> AX setSize -> app relayout -> capture -> encode
+          -> network -> decode -> present
+```
 
-> **When the client window is W×H pixels, the Mac window is set to exactly W×H
-> pixels, and the pixels are blitted 1:1.**
+That is 30ms or more, far past the frame budget of a smooth drag.
 
-The flow:
+**Accepted design:**
 
-1. The client window is resized (by the user, or by Windows snapping).
-2. The client sends the new pixel size over the metadata channel.
-3. The host sets the Mac window to **exactly** that size via the AX API
-   (`AXUIElementSetAttributeValue` on `kAXSizeAttribute`), and re-tiles.
-4. The Mac app **relayouts natively** at the new size — text reflows, controls
-   move, everything is rendered at native resolution for that size.
-5. The new frame is captured and blitted to the client **1:1**, no scaling.
+- During the drag, resample. The blur is transient and nobody will notice.
+- Fire AX `setSize` throttled to roughly 10Hz so the app relayouts as you go.
+- On `WM_EXITSIZEMOVE`, snap to exact 1:1.
 
-There is never a downscale of a big desktop, never an upscale of a small
-capture. The remote app genuinely renders at the size you're viewing. That is
-why the text stays sharp where Parsec's smears: **there is no resampling stage to
-smear it.**
+This is what RDP's dynamic resolution does. Build it in from the start rather
+than discovering it later.
 
-Scale factors (Retina 2× vs Windows per-monitor DPI) are accounted for as
-*integer backing ratios*, not as arbitrary image scaling. The client is built
-Per-Monitor-V2 DPI aware (via application manifest) precisely so it can map
-physical pixels 1:1 without the OS silently rescaling underneath it.
+---
 
-## The live-resize compromise
+## 3. The virtual display as a sprite sheet
 
-The no-resampling rule cannot hold *during* an interactive drag-resize.
+The naive design is one ScreenCaptureKit stream per Mac window. It is the obvious
+mapping and it is a trap:
 
-A round trip — client sends new size → host writes AX size → app relayouts →
-frame captured → frame encoded → frame arrives — is **30 ms or more**. A window
-drag produces new sizes far faster than that; you'd blow the frame budget on
-every mouse-move and the drag would feel like glue.
+- N windows means N encoder sessions.
+- SCK stream startup is ~100ms+, so ephemeral popups can never work.
+- You are managing a fleet of stream lifecycles.
 
-So during a live resize we do what RDP does, and accept it honestly:
+**Instead, invert it.**
 
-- **Accept transient blur** while the drag is in flight. The client scales the
-  most recent 1:1 frame to fill the changing window — this is the *only* place
-  resampling is allowed, and only because it is temporary.
-- **Throttle AX `setSize`** to roughly **10 Hz** so we don't flood the host with
-  writes the app can't keep up with.
-- **Snap to crisp on `WM_EXITSIZEMOVE`.** When the drag ends, send the final
-  size once, let the app relayout, and blit the resulting frame 1:1.
+Create a large virtual display on the Mac, make it the main display, and use the
+Accessibility API to tile every application window on it **non-overlapping**.
+Nobody looks at this display. It is not a desktop. It is a sprite sheet.
 
-Steady state is always crisp. Only the moving edge is soft, only while it moves.
+Then:
 
-## Open questions (stated honestly)
+- Capture **one** stream of that whole display with **one** encoder.
+- Every window is guaranteed unoccluded, so every window always renders.
+- Popups, sheets, and `NSMenu`s come along for free because they are already in
+  the frame.
+- Window rects travel on a lightweight side metadata channel.
+- The client decodes one texture; each proxy window samples its own sub-rect.
 
-These are unresolved and are why the `probe` command exists. None are known to
-work; each is a de-risking experiment (a separate task).
+**The Windows PC becomes the real window manager. The Mac only draws.**
 
-1. **Do NSMenu popups appear in ScreenCaptureKit capture of the virtual
-   display?** The "popups are free" claim depends on this. NSMenus are rendered
-   in their own windows and may be placed by the system on the *active* display
-   or near the cursor rather than on the virtual display we're capturing. If they
-   don't land in our frame, they aren't free and need separate handling.
-   (`probe menu-capture`.)
+### 3.1 Why the bandwidth objection dissolves
 
-2. **Are AX geometry writes honored exactly, or clamped?** Geometry mirroring
-   assumes `kAXSizeAttribute`/`kAXPositionAttribute` writes land at the exact
-   pixel size we request. Apps and the window server may clamp to minimum sizes,
-   snap to increments, refuse certain sizes, or round. If a window won't become
-   exactly W×H, the 1:1 blit has to cope with the discrepancy. (`probe
-   ax-geometry`.)
+A large frame that is 95% static encodes to almost nothing, because H.264/HEVC
+skip blocks are free. You pay for the pixels that change, which is the same as
+any other approach.
 
-3. **What is the tiling budget?** Every managed window must fit *simultaneously*
-   and *non-overlapping* on one virtual display. How many windows, at what sizes,
-   before we run out of virtual display area? What's the largest virtual display
-   BetterDisplay will give us, and does capture/encode cost scale with its total
-   pixel area? This bounds how many windows a session can hold. (`probe
-   tile-budget`.)
+### 3.2 Why the virtual display is main
 
-## Hardware context
+Two independent reasons converge:
 
-The target rig this is being designed against:
+1. **The menu bar follows the main display.** We need the menu bar in the capture
+   (see 1.1), so it must live on the virtual display.
+2. **AX global coordinates originate at the main display's top-left.** Making the
+   virtual display main means AX global space and virtual-display space share an
+   origin, which eliminates an entire class of offset bug.
 
-- **Host:** M1 Max Mac Studio.
-- **Client:** Core Ultra 9 285K / RTX 5090 / Windows 11.
-- **Network:** wired LAN.
+### 3.3 Sizing, and the tiling budget
 
-Design decisions assume this envelope (a fast local network, a capable encoder
-on each end). They are not tuned for WAN or for low-end hardware yet.
+An earlier draft of this design specified a 6144x6144 virtual display. That was
+wrong. 37 megapixels at 60fps is ~2.3 gigapixels/sec of encode, which the M1 Max
+media engine cannot do.
 
-## Component map
+Size the virtual display for **actual usage**. Two or three windows at native
+Windows-monitor sizes is the real target:
 
-| Concern | Host (`transom-host`, Swift) | Client (`transom-client`, Rust) |
-| --- | --- | --- |
-| Pixels | one SCK stream of the virtual display (`capture`) | crop sub-rects, blit 1:1 (D3D11) |
-| Geometry in | apply AX size/pos (`place`, `tile`) | send desired pixel size |
-| Geometry out | report window rects | own real window placement / WM |
-| Menus | observe global menu bar (`menuwatch`) | re-present menus in/near window |
-| Health | `doctor` | `doctor` |
-| De-risking | `probe` | — |
+| Window   | Size      |
+|----------|-----------|
+| Xcode    | 2560x1440 |
+| Conductor| 1280x1440 |
+
+That fits comfortably in 4K-to-5K, roughly the same pixel budget Parsec already
+handles on this hardware.
+
+> **The tiling budget is a hard constraint.** Every window you want open, at full
+> native size, must fit simultaneously on one virtual display without
+> overlapping. This number decides how far Transom scales. Compute it for your
+> real window set before committing to a display size.
+
+### 3.4 Deferred: the encoder pool
+
+If the window count ever outgrows a single tiled display, the fallback is a pool
+of ~8-10 pre-warmed VideoToolbox sessions (pre-warmed to avoid the ~100ms cold
+start that would break popups), with attention-based throttling: focused window
+at full rate, background windows at 5-10fps or frozen until they change.
+
+**This is not in scope.** It solves a problem we do not have. Documented only so
+it is not reinvented from scratch later.
+
+### 3.5 The virtual display is created externally
+
+`CGVirtualDisplay` is private API. Transom does **not** create the virtual
+display. Use BetterDisplay (or equivalent) and pass the resulting display ID to
+the host. The host targets whatever display ID it is given.
+
+---
+
+## 4. System diagram
+
+```
+   Mac Studio (host)                          Windows PC (client)
+   only draws pixels                          real window manager
+  +--------------------------+               +--------------------------+
+  |  Virtual display (main)  |               |  Video decoder           |
+  |  windows tiled,          |               |  one shared texture      |
+  |  never overlapping       |               |                          |
+  +--------------------------+               +--------------------------+
+  |  Accessibility API       |   video +     |  Proxy windows           |
+  |  reads + writes geometry |   rect meta   |  each samples a sub-rect |
+  +--------------------------+  ==========>  +--------------------------+
+  |  SCK + VideoToolbox      |  <==========  |  Input capture           |
+  |  one stream, one encoder |  input + geom |  tagged by window id     |
+  +--------------------------+               +--------------------------+
+```
+
+---
+
+## 5. Latency budget
+
+Parsec's approach is a tight GPU-to-GPU path: capture texture never leaves the
+GPU, hardware encode, custom UDP with essentially no buffering, direct D3D
+swapchain present, often in exclusive fullscreen bypassing DWM entirely. On LAN
+that is roughly 10-16ms added.
+
+Transom can match most of it. SCK hands back IOSurface-backed buffers that feed
+VideoToolbox with zero copy. Wired LAN between host and client is sub-millisecond.
+NVDEC on the client is effectively instant.
+
+Two things Transom **cannot** match, and both should be accepted up front:
+
+1. **WebRTC's jitter buffer** is 50-100ms by default. `playoutDelayHint` of 0
+   still leaves Chromium buffering. If the latency bar matters, WebRTC is out and
+   a custom UDP transport is required. **This is why the client is native Win32 +
+   D3D11 and not Electron.**
+2. **DWM.** Parsec can go exclusive fullscreen with a single surface and bypass
+   the compositor. Transom wants many independent windows, which means permanent
+   DWM composition, which is a guaranteed extra frame. At 60Hz that is +16ms that
+   cannot be engineered away. **The feature forecloses the trick.**
+
+**Realistic target: 25-35ms end to end.** Behind Parsec, and fine for Xcode. This
+is not a twitch-aiming workload.
+
+---
+
+## 6. Quality
+
+Games are forgiving. 4:2:0 chroma subsampling discards 75% of color resolution
+and nobody notices on a rendered 3D scene. Xcode is *text*, with subpixel
+antialiasing and syntax coloring, where 4:2:0 produces visible fringing.
+
+Two requirements:
+
+- **HEVC 4:4:4.** Roughly triples chroma bitrate. **Must verify the M1 Max media
+  engine encodes 4:4:4 in hardware rather than falling back to software.** See
+  open question OQ-4.
+- **1:1 pixel mapping, everywhere.** See `invariants.md`.
+
+Note: the author's existing Parsec setup already achieves text-quality streaming
+on this exact hardware pair. Checking which color mode it runs in is a cheap way
+to learn whether the quality ceiling is available at all.
+
+---
+
+## 7. Non-goals
+
+- Not a general-purpose remote desktop. Parsec and VNC already do that.
+- Not cross-platform. macOS host, Windows client, wired LAN.
+- Not a security product. Assume a trusted LAN for now. Do not ship over the
+  internet without solving auth and encryption, which are not designed yet.
+- Not creating virtual displays (3.5).
+- Not the encoder pool (3.4).
+- Not audio. Later, if ever.
+
+---
+
+## 8. Open questions
+
+These are unresolved. They are ordered by how likely they are to kill the
+project. Do not paper over them.
+
+### OQ-1: Do transient windows appear in an SCK capture? (CRITICAL)
+
+Does an open `NSMenu` (Xcode's Product menu), a sheet, or a code-completion
+popup appear in a ScreenCaptureKit display capture? Does AX report them as
+windows with usable frames?
+
+**If menus do not appear in the capture, there is no product.** Answer this
+before writing anything else. Host milestone M0, `menuwatch`.
+
+### OQ-2: Are AX geometry writes honored exactly?
+
+When we set `AXPosition` and `AXSize`, does macOS honor them, or does it clamp to
+display bounds, round to even pixels, or enforce an application minimum size?
+Xcode may refuse sizes below some floor.
+
+Any clamping constrains the entire tiling design. The `place` command must read
+back and **report the delta**. The delta is the entire point of that command.
+
+### OQ-3: Is there a stable window identity across AX and SCK?
+
+SCK's `SCWindow` exposes a `CGWindowID`. AX exposes `AXUIElement`. Correlating
+them is not obviously possible through public API. The known route is
+`_AXUIElementGetWindow`, which is **private**.
+
+Alternatives to investigate: matching AX frames against
+`CGWindowListCopyWindowInfo` output heuristically (fragile, ambiguous with
+identically-sized windows), or deriving identity some other way.
+
+This matters because every rect on the wire needs a stable ID the client can key
+its proxy windows on.
+
+### OQ-4: Does the M1 Max hardware-encode HEVC 4:4:4?
+
+Testable in an afternoon with `VTCopySupportedPropertyDictionaryForEncoder` plus
+a test encode. If 4:4:4 is software-only on this host, the quality ceiling drops
+and section 6 needs rewriting.
+
+### OQ-5: What is the metadata lag?
+
+Rect metadata arriving a frame late relative to the pixels is a visible shear
+during window motion. How many frames? Does it need explicit
+timestamp correlation, or is best-effort good enough? Host M0 `probe` answers
+this.
+
+### OQ-6: What is the largest virtual display BetterDisplay will create?
+
+And does macOS behave sanely with a main display much larger than any physical
+one? Unknown.
+
+---
+
+## 9. Decision log
+
+| Decision | Rationale |
+|---|---|
+| Virtual display as sprite sheet, one stream | One encoder, no occlusion, popups free, no cold start (3) |
+| Virtual display is the main display | Menu bar capture + AX origin alignment (3.2) |
+| Virtual display created externally | `CGVirtualDisplay` is private API (3.5) |
+| Native Win32 + D3D11 client, not Electron | Chromium owns DPI and resampling; cannot opt out (5) |
+| Rust + windows-rs, not C++ | Cargo beats vcpkg/MSVC projects; windows-rs is a 1:1 binding so MS C++ docs translate directly. Caveat: Media Foundation / NVDEC samples are all C++, so decoder work will need translation |
+| Swift for the host | Native SCK, AX, VideoToolbox, CoreGraphics |
+| Two repos, not a monorepo | Different languages, toolchains, CI, and machines. Merge at M2 when the wire protocol needs a shared schema |
+| AGPL-3.0 | Genuinely client-server software, so the network clause has teeth. Keeps dual-licensing open |
+| Physical pixels everywhere on the wire | See `invariants.md` |
+| Live resize resamples, snaps on exit | A roundtrip is 30ms+, past a drag's frame budget (2.1) |
+| Accept the DWM frame | Many-windows requirement forecloses exclusive fullscreen (5) |
+| Encoder pool deferred | Solves a problem we do not have at 2-3 windows (3.4) |
