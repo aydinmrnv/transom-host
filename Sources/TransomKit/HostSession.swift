@@ -117,6 +117,7 @@ public final class HostSession: @unchecked Sendable {
     private var capture: DisplayCapture?
     private var encoder: HEVCEncoder?
     private var eventSink: AsyncStream<WindowWatcher.WindowEvent>.Continuation?
+    private var clientSink: AsyncStream<ClientMessage>.Continuation?
     private var tasks: [Task<Void, Never>] = []
 
     // Everything a background callback writes lives behind this lock.
@@ -207,12 +208,18 @@ public final class HostSession: @unchecked Sendable {
         watcher.onEvent = { event in eventSink.yield(event) }
         self.watcher = watcher
 
+        // Phase 4 (issue #6): the geometry roundtrip. Client RequestResize is
+        // throttled (~10Hz), written to AX, read back, and emitted as windowMoved
+        // (ACTUAL geometry, I-4) through the same ordered event stream, so both this
+        // CLI and the host app get resize for free.
+        let resize = ResizeService(
+            registry: registry, display: disp, gutter: config.gutter,
+            emit: { event in eventSink.yield(event) })
+        let (clientMessages, clientSink) = AsyncStream.makeStream(of: ClientMessage.self)
+        self.clientSink = clientSink
+
         let controlServer = ControlServer(vdsSize: vdsSize, registry: registry)
-        await controlServer.setOnClientMessage { message in
-            // Phase 4 wires requestResize -> AX. For now, surface it.
-            Log.general.notice(
-                "control: client -> \(String(describing: message), privacy: .public)")
-        }
+        await controlServer.setOnClientMessage { message in clientSink.yield(message) }
         await controlServer.setOnConnectionChange { [weak self] connected in
             self?.statsLock.withLock { self?.controlConnected = connected }
         }
@@ -243,6 +250,26 @@ public final class HostSession: @unchecked Sendable {
         tasks.append(
             Task {
                 for await event in events { await controlServer.broadcast(event) }
+            })
+        // Drive resize requests in arrival order (AX writes serialise on the actor),
+        // and tick at ~20Hz so a coalesced live from a paused drag still flushes.
+        tasks.append(
+            Task {
+                for await message in clientMessages {
+                    if case let .requestResize(id, size, phase) = message {
+                        await resize.handle(id: id, size: size, phase: phase)
+                    } else {
+                        Log.general.notice(
+                            "control: client -> \(String(describing: message), privacy: .public)")
+                    }
+                }
+            })
+        tasks.append(
+            Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    await resize.tick()
+                }
             })
         controlListener.start()
 
@@ -301,6 +328,7 @@ public final class HostSession: @unchecked Sendable {
         if let capture { await capture.stop() }
         encoder?.finish()
         eventSink?.finish()
+        clientSink?.finish()
         for task in tasks { task.cancel() }
         // Stopping its run loop ends the watcher thread; the AXObserver and its
         // source are released when the watcher deallocates below.
@@ -315,6 +343,7 @@ public final class HostSession: @unchecked Sendable {
         capture = nil
         encoder = nil
         eventSink = nil
+        clientSink = nil
 
         statsLock.withLock {
             isRunning = false
