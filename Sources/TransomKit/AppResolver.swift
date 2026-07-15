@@ -43,9 +43,10 @@ public enum AppResolver {
                 .sorted()
                 .prefix(40)
                 .joined(separator: ", ")
-            return .failure(ProbeError(
-                "no running application matches \"\(token)\". "
-                    + "Running apps: \(names)"))
+            return .failure(
+                ProbeError(
+                    "no running application matches \"\(token)\". "
+                        + "Running apps: \(names)"))
         case 1:
             let app = hits[0]
             return .success(
@@ -57,9 +58,10 @@ public enum AppResolver {
             let detail = hits.map {
                 "\($0.localizedName ?? "?") (pid \($0.processIdentifier))"
             }.joined(separator: ", ")
-            return .failure(ProbeError(
-                "\"\(token)\" is ambiguous, matched: \(detail). "
-                    + "Pass the bundle identifier to disambiguate."))
+            return .failure(
+                ProbeError(
+                    "\"\(token)\" is ambiguous, matched: \(detail). "
+                        + "Pass the bundle identifier to disambiguate."))
         }
     }
 

@@ -146,7 +146,8 @@ struct Tile: ParsableCommand {
         }
 
         Log.general.notice(
-            "tile \(target.name, privacy: .public) fits=\(fits, privacy: .public) overlap=\(overlaps, privacy: .public)")
+            "tile \(target.name, privacy: .public) fits=\(fits, privacy: .public) overlap=\(overlaps, privacy: .public)"
+        )
 
         if !fits || overlaps { throw ExitCode.failure }
     }

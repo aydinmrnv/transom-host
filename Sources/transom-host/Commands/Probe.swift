@@ -59,7 +59,9 @@ struct Probe: AsyncParsableCommand {
         try FileManager.default.createDirectory(
             at: outDir, withIntermediateDirectories: true)
 
-        print("probe: \(target.name) on display \(display) (\(disp.pixelWidth)x\(disp.pixelHeight) px)")
+        print(
+            "probe: \(target.name) on display \(display) (\(disp.pixelWidth)x\(disp.pixelHeight) px)"
+        )
         print("  out=\(outDir.path)  fps=\(fps)  poll=\(hz)Hz  duration=\(duration)s")
 
         let capture = DisplayCapture(display: disp, fps: fps)

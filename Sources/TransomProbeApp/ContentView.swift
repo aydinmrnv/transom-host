@@ -47,10 +47,14 @@ struct ContentView: View {
             }
             HStack {
                 Button("Open Screen Recording settings") {
-                    open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+                    open(
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+                    )
                 }
                 Button("Open Accessibility settings") {
-                    open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                    open(
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+                    )
                 }
                 Button("Refresh", action: refreshPermissions)
             }
@@ -59,9 +63,11 @@ struct ContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text("bundle id:  \(identity.identifier ?? "—")")
                     .font(.system(.caption, design: .monospaced))
-                Text("cdhash:     \(identity.cdhash ?? "—")\(identity.isAdHoc ? "  (AD-HOC — TCC will re-prompt every build)" : "")")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(identity.isAdHoc ? Color.orange : Color.secondary)
+                Text(
+                    "cdhash:     \(identity.cdhash ?? "—")\(identity.isAdHoc ? "  (AD-HOC — TCC will re-prompt every build)" : "")"
+                )
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(identity.isAdHoc ? Color.orange : Color.secondary)
             }
             .padding(8)
             .background(Color.secondary.opacity(0.08))
@@ -102,8 +108,10 @@ struct ContentView: View {
     private var liveProbeSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Live probe  ·  OQ-1").font(.title2).bold()
-            Text("Pick an app + display, Start, then open the app's menus. Watch whether the menu appears in the capture and whether AX draws a rect (orange) around it.")
-                .font(.caption).foregroundStyle(.secondary)
+            Text(
+                "Pick an app + display, Start, then open the app's menus. Watch whether the menu appears in the capture and whether AX draws a rect (orange) around it."
+            )
+            .font(.caption).foregroundStyle(.secondary)
 
             HStack {
                 Picker("App", selection: $selectedAppPID) {
@@ -176,8 +184,10 @@ struct ContentView: View {
     private var geometrySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Geometry test  ·  OQ-2").font(.title2).bold()
-            Text("Set a window's position/size via AX, read it back, and compare. The delta is the answer (I-4).")
-                .font(.caption).foregroundStyle(.secondary)
+            Text(
+                "Set a window's position/size via AX, read it back, and compare. The delta is the answer (I-4)."
+            )
+            .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Picker("Window", selection: $geometry.windowIndex) {
                     ForEach(geometry.windows, id: \.index) {
@@ -210,7 +220,8 @@ struct ContentView: View {
                             .font(.system(.caption, design: .monospaced))
                         Text(r.positionDelta.map { "(\(i($0.x)),\(i($0.y)))" } ?? "—")
                             .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(deltaColor(r.positionDelta.map { $0 == .zero } ?? false))
+                            .foregroundStyle(
+                                deltaColor(r.positionDelta.map { $0 == .zero } ?? false))
                     }
                     GridRow {
                         Text("size").font(.system(.caption, design: .monospaced))

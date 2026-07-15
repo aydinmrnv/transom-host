@@ -110,7 +110,8 @@ struct Place: ParsableCommand {
         print("  OQ-2: writes honored exactly? \(result.exact ? "YES" : "NO — see deltas above")")
 
         Log.ax.notice(
-            "place \(target.name, privacy: .public)[\(self.index)] exact=\(result.exact, privacy: .public)")
+            "place \(target.name, privacy: .public)[\(self.index)] exact=\(result.exact, privacy: .public)"
+        )
     }
 
     private func i(_ v: CGFloat) -> Int { Int(v.rounded()) }

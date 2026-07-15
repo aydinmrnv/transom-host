@@ -175,9 +175,10 @@ final class ProbeModel: ObservableObject {
         let w = AXWindow(element: element, index: -1)
         let role = w.role
         let subrole = w.subrole
-        let frameStr = w.frame().map {
-            "(\(Int($0.origin.x)),\(Int($0.origin.y))) \(Int($0.size.width))x\(Int($0.size.height)) pt"
-        } ?? "(no frame)"
+        let frameStr =
+            w.frame().map {
+                "(\(Int($0.origin.x)),\(Int($0.origin.y))) \(Int($0.size.width))x\(Int($0.size.height)) pt"
+            } ?? "(no frame)"
 
         switch notification {
         case kAXMenuOpenedNotification:

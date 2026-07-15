@@ -16,11 +16,11 @@ struct Transom: AsyncParsableCommand {
         commandName: "transom-host",
         abstract: "Host-side agent for the Transom seamless remote windowing system.",
         discussion: """
-        Transom streams individual macOS app windows to a Windows client as \
-        independent native windows. This host process draws and captures on the \
-        Mac; the Windows client manages the windows. This is a pre-alpha \
-        prototype: only `doctor` does real work today.
-        """,
+            Transom streams individual macOS app windows to a Windows client as \
+            independent native windows. This host process draws and captures on the \
+            Mac; the Windows client manages the windows. This is a pre-alpha \
+            prototype: only `doctor` does real work today.
+            """,
         version: "0.0.1-alpha",
         subcommands: [
             Doctor.self,
