@@ -98,18 +98,26 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         if let s { try? await s.stopCapture() }
     }
 
-    /// Latest frame as a CGImage, converted on demand. Nil until the first
-    /// complete frame arrives.
+    /// Latest frame as a CGImage at **native pixels**, converted on demand. Nil
+    /// until the first complete frame arrives. Never resamples (I-1): callers that
+    /// only need a small preview let the display layer scale it down for drawing.
+    ///
+    /// The IOSurface-backed buffer is grabbed under the lock and the (potentially
+    /// expensive) `createCGImage` runs **outside** it — holding a strong ref keeps
+    /// the buffer alive against pool recycling, exactly as the capture callback's
+    /// own `onFrame` render does — so a 60fps capture callback is never blocked
+    /// waiting on a preview conversion.
     public func latestImage() -> CGImage? {
-        lock.withLock {
-            guard let buffer = latestPixelBuffer else { return nil }
-            return ciContext.createCGImage(
-                CIImage(cvPixelBuffer: buffer),
-                from: CGRect(
-                    x: 0, y: 0,
-                    width: CVPixelBufferGetWidth(buffer),
-                    height: CVPixelBufferGetHeight(buffer)))
+        let (buffer, ctx): (CVPixelBuffer?, CIContext) = lock.withLock {
+            (latestPixelBuffer, ciContext)
         }
+        guard let buffer else { return nil }
+        return ctx.createCGImage(
+            CIImage(cvPixelBuffer: buffer),
+            from: CGRect(
+                x: 0, y: 0,
+                width: CVPixelBufferGetWidth(buffer),
+                height: CVPixelBufferGetHeight(buffer)))
     }
 
     // MARK: - SCStreamOutput
