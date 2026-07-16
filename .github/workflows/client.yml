@@ -1,0 +1,36 @@
+name: client
+
+on:
+  push:
+    branches: [main]
+    paths: ['client/**', '.github/workflows/client.yml']
+  pull_request:
+    paths: ['client/**', '.github/workflows/client.yml']
+
+concurrency:
+  group: client-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: client
+
+jobs:
+  build:
+    name: build + lint (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Format
+        run: cargo fmt --check

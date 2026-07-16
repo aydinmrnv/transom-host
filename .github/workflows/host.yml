@@ -1,13 +1,19 @@
-name: ci
+name: host
 
 on:
   push:
     branches: [main]
+    paths: ['host/**', '.github/workflows/host.yml']
   pull_request:
+    paths: ['host/**', '.github/workflows/host.yml']
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: host-${{ github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: host
 
 jobs:
   build:
@@ -23,6 +29,9 @@ jobs:
 
       - name: Build
         run: swift build
+
+      - name: Test
+        run: swift test
 
       - name: Lint (swift-format)
         run: swift format lint --recursive Sources Package.swift
