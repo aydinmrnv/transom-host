@@ -137,7 +137,7 @@ impl Session {
         let mut w = self
             .control_write
             .lock()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "poisoned write lock"))?;
+            .map_err(|_| std::io::Error::other("poisoned write lock"))?;
         net::send_message(&mut *w, msg)
     }
 
